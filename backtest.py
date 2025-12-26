@@ -177,7 +177,133 @@ def run_backtest_for_symbol(symbol, df, indicator="supertrend", direction="long"
         win_rate, total_pnl, avg_pnl, max_dd, initial_capital, equity,
         (equity - initial_capital) / initial_capital * 100)
 
-    return trades, result
+    # Return equity curve with timestamps
+    equity_df = pd.DataFrame({
+        'timestamp': df.index[:len(equity_curve)],
+        'equity': equity_curve
+    })
+
+    return trades, result, equity_df
+
+
+def generate_equity_chart_html(equity_curves: dict, output_path: str):
+    """Generate an interactive HTML chart with all equity curves."""
+    html_content = """<!DOCTYPE html>
+<html>
+<head>
+    <title>Backtest Equity Curves</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+        h1, h2 { color: #00d4ff; }
+        .chart { width: 100%; height: 500px; margin-bottom: 30px; }
+        .summary { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+        .positive { color: #00ff88; }
+        .negative { color: #ff4757; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #333; }
+        th { background: #16213e; color: #00d4ff; }
+        tr:hover { background: #1f3460; }
+        .filter-btn { padding: 8px 16px; margin: 5px; cursor: pointer; border: none; border-radius: 4px; }
+        .filter-btn.active { background: #00d4ff; color: #000; }
+        .filter-btn:not(.active) { background: #333; color: #fff; }
+    </style>
+</head>
+<body>
+    <h1>Backtest Equity Curves</h1>
+    <div class="summary">
+        <strong>Generated:</strong> """ + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + """
+    </div>
+
+    <div>
+        <button class="filter-btn active" onclick="filterCharts('all')">All</button>
+        <button class="filter-btn" onclick="filterCharts('long')">Long Only</button>
+        <button class="filter-btn" onclick="filterCharts('short')">Short Only</button>
+    </div>
+
+    <div id="combined-chart" class="chart"></div>
+    <h2>Individual Equity Curves</h2>
+"""
+
+    # Generate individual chart divs
+    for key in equity_curves.keys():
+        html_content += f'    <div id="chart-{key.replace("/", "-")}" class="chart" data-direction="{key.split("/")[2]}"></div>\n'
+
+    html_content += """
+    <script>
+    var equityData = """ + str({k: {'x': [str(t) for t in v['timestamp'].tolist()], 'y': v['equity'].tolist()} for k, v in equity_curves.items()}) + """;
+
+    // Combined chart
+    var combinedTraces = [];
+    var colors = ['#00d4ff', '#00ff88', '#ff4757', '#ffd93d', '#6c5ce7', '#a29bfe', '#fd79a8', '#00b894'];
+    var i = 0;
+    for (var key in equityData) {
+        combinedTraces.push({
+            x: equityData[key].x,
+            y: equityData[key].y,
+            name: key,
+            type: 'scatter',
+            mode: 'lines',
+            line: {color: colors[i % colors.length], width: 1.5}
+        });
+        i++;
+    }
+
+    Plotly.newPlot('combined-chart', combinedTraces, {
+        title: 'All Equity Curves Combined',
+        paper_bgcolor: '#1a1a2e',
+        plot_bgcolor: '#16213e',
+        font: {color: '#eee'},
+        xaxis: {gridcolor: '#333'},
+        yaxis: {gridcolor: '#333', title: 'Equity ($)'},
+        legend: {orientation: 'h', y: -0.2}
+    });
+
+    // Individual charts
+    for (var key in equityData) {
+        var divId = 'chart-' + key.replace(/\\//g, '-');
+        var startVal = equityData[key].y[0];
+        var endVal = equityData[key].y[equityData[key].y.length - 1];
+        var returnPct = ((endVal - startVal) / startVal * 100).toFixed(2);
+        var color = endVal >= startVal ? '#00ff88' : '#ff4757';
+
+        Plotly.newPlot(divId, [{
+            x: equityData[key].x,
+            y: equityData[key].y,
+            type: 'scatter',
+            mode: 'lines',
+            fill: 'tozeroy',
+            line: {color: color, width: 2},
+            fillcolor: endVal >= startVal ? 'rgba(0,255,136,0.1)' : 'rgba(255,71,87,0.1)'
+        }], {
+            title: key + ' (Return: ' + returnPct + '%)',
+            paper_bgcolor: '#1a1a2e',
+            plot_bgcolor: '#16213e',
+            font: {color: '#eee'},
+            xaxis: {gridcolor: '#333'},
+            yaxis: {gridcolor: '#333', title: 'Equity ($)'}
+        });
+    }
+
+    function filterCharts(direction) {
+        document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+        event.target.classList.add('active');
+
+        document.querySelectorAll('.chart[data-direction]').forEach(div => {
+            if (direction === 'all' || div.dataset.direction === direction) {
+                div.style.display = 'block';
+            } else {
+                div.style.display = 'none';
+            }
+        });
+    }
+    </script>
+</body>
+</html>"""
+
+    with open(output_path, 'w') as f:
+        f.write(html_content)
+    print(f"[Chart] Equity curves saved to {output_path}")
 
 
 def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None, directions=None):
@@ -193,6 +319,7 @@ def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None
     print(f"{'='*60}\n")
 
     all_trades, all_results = [], []
+    all_equity_curves = {}
 
     for symbol in symbols:
         config = get_ticker_config(symbol)
@@ -206,9 +333,14 @@ def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None
         for indicator in indicators:
             for direction in directions:
                 capital = config.get(f"initial_capital_{direction}", 1000)
-                trades, result = run_backtest_for_symbol(symbol, df, indicator, direction, capital)
+                trades, result, equity_df = run_backtest_for_symbol(symbol, df, indicator, direction, capital)
                 all_trades.extend(trades)
                 all_results.append(result)
+
+                # Store equity curve
+                curve_key = f"{symbol}/{indicator}/{direction}"
+                all_equity_curves[curve_key] = equity_df
+
                 pnl = f"+${result.total_pnl:.2f}" if result.total_pnl >= 0 else f"-${abs(result.total_pnl):.2f}"
                 print(f"  {indicator:12} {direction:5} | {result.total_trades:3} trades | {result.win_rate*100:5.1f}% | {pnl:>10}")
 
@@ -221,12 +353,36 @@ def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None
     print(f"Total P&L: ${total_pnl:+,.2f}")
     print(f"Return: {total_pnl/total_capital*100:+.2f}%")
 
+    # Create output directory
     Path(BACKTEST_OUTPUT_DIR).mkdir(exist_ok=True)
-    pd.DataFrame([asdict(t) for t in all_trades]).to_csv(f"{BACKTEST_OUTPUT_DIR}/backtest_trades.csv", index=False)
+
+    # Save all trades
+    all_trades_df = pd.DataFrame([asdict(t) for t in all_trades])
+    all_trades_df.to_csv(f"{BACKTEST_OUTPUT_DIR}/backtest_trades.csv", index=False)
+
+    # Save separate trade lists for long and short
+    if not all_trades_df.empty:
+        long_trades = all_trades_df[all_trades_df['direction'] == 'long']
+        short_trades = all_trades_df[all_trades_df['direction'] == 'short']
+
+        if not long_trades.empty:
+            long_trades.to_csv(f"{BACKTEST_OUTPUT_DIR}/trades_long.csv", index=False)
+            print(f"[Trades] Long trades: {len(long_trades)} saved to trades_long.csv")
+
+        if not short_trades.empty:
+            short_trades.to_csv(f"{BACKTEST_OUTPUT_DIR}/trades_short.csv", index=False)
+            print(f"[Trades] Short trades: {len(short_trades)} saved to trades_short.csv")
+
+    # Save results
     pd.DataFrame([asdict(r) for r in all_results]).to_csv(f"{BACKTEST_OUTPUT_DIR}/backtest_results.csv", index=False)
+
+    # Generate equity curve charts
+    if all_equity_curves:
+        generate_equity_chart_html(all_equity_curves, f"{BACKTEST_OUTPUT_DIR}/equity_curves.html")
+
     print(f"\nResults saved to {BACKTEST_OUTPUT_DIR}/")
 
-    return all_trades, all_results
+    return all_trades, all_results, all_equity_curves
 
 
 if __name__ == "__main__":
