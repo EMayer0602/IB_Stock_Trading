@@ -27,7 +27,10 @@ except ImportError:
         YF_AVAILABLE = False
         print("[Warning] yfinance not installed. Run: pip install yfinance")
 
-from tickers_config import TICKERS, SYMBOLS, get_ticker_config
+from tickers_config import (
+    TICKERS, SYMBOLS, ENABLED_SYMBOLS, get_ticker_config,
+    get_indicator_for_symbol, get_direction_for_symbol, get_best_strategies
+)
 import supertrend_strategy as st
 
 NY_TZ = ZoneInfo("America/New_York")
@@ -306,7 +309,84 @@ def generate_equity_chart_html(equity_curves: dict, output_path: str):
     print(f"[Chart] Equity curves saved to {output_path}")
 
 
+def run_best_strategies_backtest(period="6mo", interval="1h"):
+    """Run backtest using only the best indicator/direction per symbol from config."""
+    strategies = get_best_strategies()
+
+    print(f"\n{'='*60}")
+    print(f"IB STOCK TRADING BACKTEST - BEST STRATEGIES - {period}")
+    print(f"{'='*60}\n")
+
+    all_trades, all_results = [], []
+    all_equity_curves = {}
+
+    for strat in strategies:
+        symbol = strat["symbol"]
+        indicator = strat["indicator"]
+        direction = strat["direction"]
+        capital = strat["capital"]
+
+        print(f"[{symbol}] Fetching data...")
+        df = fetch_historical_data(symbol, period, interval)
+        if df is None or len(df) < 50:
+            print(f"[{symbol}] Skipped")
+            continue
+        print(f"[{symbol}] {len(df)} bars | {indicator} | {direction}")
+
+        trades, result, equity_df = run_backtest_for_symbol(symbol, df, indicator, direction, capital)
+        all_trades.extend(trades)
+        all_results.append(result)
+
+        # Store equity curve
+        curve_key = f"{symbol}/{indicator}/{direction}"
+        all_equity_curves[curve_key] = equity_df
+
+        pnl = f"+${result.total_pnl:.2f}" if result.total_pnl >= 0 else f"-${abs(result.total_pnl):.2f}"
+        print(f"  {result.total_trades:3} trades | {result.win_rate*100:5.1f}% win | {pnl:>10}")
+
+    print(f"\n{'='*60}")
+    print("SUMMARY")
+    print(f"{'='*60}")
+    total_pnl = sum(r.total_pnl for r in all_results)
+    total_capital = sum(r.start_capital for r in all_results)
+    print(f"Total Trades: {len(all_trades)}")
+    print(f"Total P&L: ${total_pnl:+,.2f}")
+    print(f"Return: {total_pnl/total_capital*100:+.2f}%")
+
+    # Create output directory
+    Path(BACKTEST_OUTPUT_DIR).mkdir(exist_ok=True)
+
+    # Save all trades
+    all_trades_df = pd.DataFrame([asdict(t) for t in all_trades])
+    all_trades_df.to_csv(f"{BACKTEST_OUTPUT_DIR}/backtest_trades.csv", index=False)
+
+    # Save separate trade lists for long and short
+    if not all_trades_df.empty:
+        long_trades = all_trades_df[all_trades_df['direction'] == 'long']
+        short_trades = all_trades_df[all_trades_df['direction'] == 'short']
+
+        if not long_trades.empty:
+            long_trades.to_csv(f"{BACKTEST_OUTPUT_DIR}/trades_long.csv", index=False)
+            print(f"[Trades] Long trades: {len(long_trades)} saved to trades_long.csv")
+
+        if not short_trades.empty:
+            short_trades.to_csv(f"{BACKTEST_OUTPUT_DIR}/trades_short.csv", index=False)
+            print(f"[Trades] Short trades: {len(short_trades)} saved to trades_short.csv")
+
+    # Save results
+    pd.DataFrame([asdict(r) for r in all_results]).to_csv(f"{BACKTEST_OUTPUT_DIR}/backtest_results.csv", index=False)
+
+    # Generate equity curve charts
+    if all_equity_curves:
+        generate_equity_chart_html(all_equity_curves, f"{BACKTEST_OUTPUT_DIR}/equity_curves.html")
+
+    print(f"\nResults saved to {BACKTEST_OUTPUT_DIR}/")
+
+    return all_trades, all_results, all_equity_curves
+
+
 def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None, directions=None):
+    """Run backtest with all indicator/direction combinations (sweep mode)."""
     if symbols is None:
         symbols = SYMBOLS
     if indicators is None:
@@ -315,7 +395,7 @@ def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None
         directions = ["long"]
 
     print(f"\n{'='*60}")
-    print(f"IB STOCK TRADING BACKTEST - {period}")
+    print(f"IB STOCK TRADING BACKTEST - SWEEP MODE - {period}")
     print(f"{'='*60}\n")
 
     all_trades, all_results = [], []
@@ -389,12 +469,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="IB Stock Backtest")
     parser.add_argument("--period", default="6mo", help="Period: 1mo, 3mo, 6mo, 1y")
     parser.add_argument("--interval", default="1h", help="Interval: 1h, 1d")
-    parser.add_argument("--symbols", nargs="+", help="Symbols to test")
-    parser.add_argument("--indicator", help="Single indicator")
-    parser.add_argument("--long-only", action="store_true")
+    parser.add_argument("--symbols", nargs="+", help="Symbols to test (sweep mode)")
+    parser.add_argument("--indicator", help="Single indicator (sweep mode)")
+    parser.add_argument("--long-only", action="store_true", help="Long only (sweep mode)")
+    parser.add_argument("--best", action="store_true", help="Use best strategy per symbol from config")
+    parser.add_argument("--sweep", action="store_true", help="Run all combinations (sweep mode)")
     args = parser.parse_args()
 
-    symbols = args.symbols or SYMBOLS
-    indicators = [args.indicator] if args.indicator else None
-    directions = ["long"] if args.long_only else ["long", "short"]
-    run_full_backtest(symbols, args.period, args.interval, indicators, directions)
+    if args.best or (not args.sweep and not args.symbols and not args.indicator):
+        # Default: use best strategies from config
+        run_best_strategies_backtest(args.period, args.interval)
+    else:
+        # Sweep mode: test all combinations
+        symbols = args.symbols or SYMBOLS
+        indicators = [args.indicator] if args.indicator else None
+        directions = ["long"] if args.long_only else ["long", "short"]
+        run_full_backtest(symbols, args.period, args.interval, indicators, directions)
