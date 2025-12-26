@@ -19,7 +19,11 @@ try:
     import yfinance as yf
     YF_AVAILABLE = True
 except ImportError:
-    YF_AVAILABLE = False
+    try:
+        import simple_yf as yf
+        YF_AVAILABLE = True
+    except ImportError:
+        YF_AVAILABLE = False
 
 from tickers_config import TICKERS, SYMBOLS, get_ticker_config
 import supertrend_strategy as st
@@ -29,14 +33,20 @@ SWEEP_OUTPUT_DIR = "sweep_results"
 FEE_RATE = 0.001
 
 
-def fetch_historical_data(symbol: str, period: str = "1y", interval: str = "1h") -> Optional[pd.DataFrame]:
-    """Fetch historical data using yfinance."""
+def fetch_historical_data(symbol: str, period: str = "1y", interval: str = "1h",
+                          start_date: str = None, end_date: str = None) -> Optional[pd.DataFrame]:
+    """Fetch historical data using yfinance or simple_yf fallback."""
     if not YF_AVAILABLE:
         return None
     try:
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period=period, interval=interval)
-        if df.empty:
+        # Use simple_yf with date range support
+        if start_date and end_date:
+            from simple_yf import fetch_historical_data as yf_fetch
+            df = yf_fetch(symbol, period, interval, start_date, end_date)
+        else:
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(period=period, interval=interval)
+        if df is None or df.empty:
             return None
         df.columns = df.columns.str.lower()
         df["atr"] = st.calculate_atr(df, st.ATR_WINDOW)
@@ -193,14 +203,22 @@ def main():
     parser.add_argument("--symbols", nargs="+", help="Symbols to test")
     parser.add_argument("--indicator", default="jma", help="Indicator to optimize")
     parser.add_argument("--top", type=int, default=10, help="Show top N results")
+    parser.add_argument("--start", help="Start date YYYY-MM-DD (use with --end)")
+    parser.add_argument("--end", help="End date YYYY-MM-DD (use with --start)")
     args = parser.parse_args()
 
     symbols = args.symbols or SYMBOLS
     indicator = args.indicator
 
+    # Determine date range description
+    if args.start and args.end:
+        date_desc = f"{args.start} to {args.end}"
+    else:
+        date_desc = args.period
+
     print(f"\n{'='*70}")
     print(f"IB STOCK TRADING - PARAMETER SWEEP")
-    print(f"Indicator: {indicator} | Period: {args.period} | Symbols: {len(symbols)}")
+    print(f"Indicator: {indicator} | Period: {date_desc} | Symbols: {len(symbols)}")
     print(f"{'='*70}\n")
 
     all_results = []
@@ -210,7 +228,7 @@ def main():
         capital = config.get("initial_capital_long", 1000)
 
         print(f"[{symbol}] Fetching data...")
-        df = fetch_historical_data(symbol, args.period, "1h")
+        df = fetch_historical_data(symbol, args.period, "1h", args.start, args.end)
 
         if df is None or len(df) < 100:
             print(f"[{symbol}] Skipped - insufficient data")
