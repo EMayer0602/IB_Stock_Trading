@@ -70,14 +70,20 @@ class BacktestResult:
     return_pct: float
 
 
-def fetch_historical_data(symbol: str, period: str = "6mo", interval: str = "1h") -> Optional[pd.DataFrame]:
+def fetch_historical_data(symbol: str, period: str = "6mo", interval: str = "1h",
+                          start_date: str = None, end_date: str = None) -> Optional[pd.DataFrame]:
     if not YF_AVAILABLE:
         print(f"[Backtest] yfinance required")
         return None
     try:
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period=period, interval=interval)
-        if df.empty:
+        # Use simple_yf with date range support
+        if start_date and end_date:
+            from simple_yf import fetch_historical_data as yf_fetch
+            df = yf_fetch(symbol, period, interval, start_date, end_date)
+        else:
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(period=period, interval=interval)
+        if df is None or df.empty:
             return None
         df.columns = df.columns.str.lower()
         df["atr"] = st.calculate_atr(df, st.ATR_WINDOW)
@@ -180,7 +186,8 @@ def run_backtest_for_symbol(symbol, df, indicator="supertrend", direction="long"
     return trades, result
 
 
-def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None, directions=None):
+def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None, directions=None,
+                      start_date=None, end_date=None):
     if symbols is None:
         symbols = SYMBOLS
     if indicators is None:
@@ -188,8 +195,14 @@ def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None
     if directions is None:
         directions = ["long"]
 
+    # Determine date range description
+    if start_date and end_date:
+        date_desc = f"{start_date} to {end_date}"
+    else:
+        date_desc = period
+
     print(f"\n{'='*60}")
-    print(f"IB STOCK TRADING BACKTEST - {period}")
+    print(f"IB STOCK TRADING BACKTEST - {date_desc}")
     print(f"{'='*60}\n")
 
     all_trades, all_results = [], []
@@ -197,7 +210,7 @@ def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None
     for symbol in symbols:
         config = get_ticker_config(symbol)
         print(f"[{symbol}] Fetching data...")
-        df = fetch_historical_data(symbol, period, interval)
+        df = fetch_historical_data(symbol, period, interval, start_date, end_date)
         if df is None or len(df) < 50:
             print(f"[{symbol}] Skipped")
             continue
@@ -236,9 +249,12 @@ if __name__ == "__main__":
     parser.add_argument("--symbols", nargs="+", help="Symbols to test")
     parser.add_argument("--indicator", help="Single indicator")
     parser.add_argument("--long-only", action="store_true")
+    parser.add_argument("--start", help="Start date YYYY-MM-DD (use with --end)")
+    parser.add_argument("--end", help="End date YYYY-MM-DD (use with --start)")
     args = parser.parse_args()
 
     symbols = args.symbols or SYMBOLS
     indicators = [args.indicator] if args.indicator else None
     directions = ["long"] if args.long_only else ["long", "short"]
-    run_full_backtest(symbols, args.period, args.interval, indicators, directions)
+    run_full_backtest(symbols, args.period, args.interval, indicators, directions,
+                      args.start, args.end)

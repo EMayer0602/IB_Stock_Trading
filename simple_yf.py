@@ -5,21 +5,33 @@ import pandas as pd
 from datetime import datetime, timedelta
 import time
 
-def fetch_historical_data(symbol: str, period: str = "6mo", interval: str = "1h"):
-    """Fetch historical data from Yahoo Finance using direct API."""
+def fetch_historical_data(symbol: str, period: str = "6mo", interval: str = "1h",
+                          start_date: str = None, end_date: str = None):
+    """Fetch historical data from Yahoo Finance using direct API.
 
-    # Convert period to timestamps
-    end_ts = int(datetime.now().timestamp())
+    Args:
+        symbol: Stock ticker symbol
+        period: Time period (1mo, 3mo, 6mo, 1y, 2y) - used if no dates specified
+        interval: Bar interval (1h, 1d, etc.)
+        start_date: Start date in YYYY-MM-DD format (optional)
+        end_date: End date in YYYY-MM-DD format (optional)
+    """
 
-    period_map = {
-        "1mo": 30,
-        "3mo": 90,
-        "6mo": 180,
-        "1y": 365,
-        "2y": 730
-    }
-    days = period_map.get(period, 180)
-    start_ts = int((datetime.now() - timedelta(days=days)).timestamp())
+    # Use date range if provided, otherwise use period
+    if start_date and end_date:
+        start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp())
+        end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp())
+    else:
+        end_ts = int(datetime.now().timestamp())
+        period_map = {
+            "1mo": 30,
+            "3mo": 90,
+            "6mo": 180,
+            "1y": 365,
+            "2y": 730
+        }
+        days = period_map.get(period, 180)
+        start_ts = int((datetime.now() - timedelta(days=days)).timestamp())
 
     # Yahoo Finance interval mapping
     interval_map = {
