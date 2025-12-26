@@ -19,8 +19,13 @@ try:
     import yfinance as yf
     YF_AVAILABLE = True
 except ImportError:
-    YF_AVAILABLE = False
-    print("[Warning] yfinance not installed. Run: pip install yfinance")
+    try:
+        import simple_yf as yf
+        YF_AVAILABLE = True
+        print("[Info] Using simple_yf fallback for Yahoo Finance data")
+    except ImportError:
+        YF_AVAILABLE = False
+        print("[Warning] yfinance not installed. Run: pip install yfinance")
 
 from tickers_config import TICKERS, SYMBOLS, get_ticker_config
 import supertrend_strategy as st
