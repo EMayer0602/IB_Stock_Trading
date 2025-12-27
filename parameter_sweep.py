@@ -112,10 +112,10 @@ def resample_to_timeframe(df: pd.DataFrame, target_tf: str) -> pd.DataFrame:
         return df
 
     tf_map = {
-        "2h": "2H", "3h": "3H", "4h": "4H", "5h": "5H",
-        "6h": "6H", "8h": "8H", "12h": "12H", "1d": "1D"
+        "2h": "2h", "3h": "3h", "4h": "4h", "5h": "5h",
+        "6h": "6h", "8h": "8h", "12h": "12h", "1d": "1D"
     }
-    rule = tf_map.get(target_tf, target_tf.upper())
+    rule = tf_map.get(target_tf, target_tf.lower())
 
     resampled = df.resample(rule).agg({
         'open': 'first',
