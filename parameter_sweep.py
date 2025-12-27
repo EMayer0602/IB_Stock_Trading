@@ -282,7 +282,8 @@ def run_full_sweep(
     directions: List[str] = None,
     timeframes: List[str] = None,
     initial_capital: float = 1000,
-    quick_mode: bool = False
+    quick_mode: bool = False,
+    show_progress: bool = True
 ) -> List[Dict]:
     """Run comprehensive parameter sweep."""
 
@@ -313,6 +314,17 @@ def run_full_sweep(
     atr_mults = ATR_MULTS if not quick_mode else [1.5, 2.0, None]
     min_holds = MIN_HOLD_BARS if not quick_mode else [0, 12, 24]
     htf_configs = HTF_CONFIGS if not quick_mode else [HTF_CONFIGS[0], HTF_CONFIGS[2]]
+
+    # Calculate total combinations for progress
+    total_combinations = 0
+    for indicator in indicators:
+        params = INDICATOR_PARAMS[indicator]
+        param_combos = len(params["param_a"]) * len(params["param_b"])
+        total_combinations += (param_combos * len(directions) * len(timeframes) *
+                               len(atr_mults) * len(min_holds) * len(htf_configs))
+
+    current = 0
+    last_pct = -1
 
     for indicator in indicators:
         params = INDICATOR_PARAMS[indicator]
@@ -362,6 +374,19 @@ def run_full_sweep(
 
                                 results.append(result)
 
+                                # Progress update
+                                current += 1
+                                if show_progress:
+                                    pct = int(current * 100 / total_combinations)
+                                    if pct != last_pct and pct % 5 == 0:
+                                        best_so_far = max((r["total_pnl"] for r in results), default=0)
+                                        print(f"\r  [{symbol}] {pct:3d}% ({current}/{total_combinations}) "
+                                              f"Best: ${best_so_far:+.2f}    ", end="", flush=True)
+                                        last_pct = pct
+
+    if show_progress:
+        print()  # Newline after progress
+
     return results
 
 
@@ -407,19 +432,33 @@ def main():
     print(f"{'='*80}\n")
 
     all_results = []
+    import time
+    start_time = time.time()
 
-    for symbol in symbols:
+    for idx, symbol in enumerate(symbols, 1):
         config = get_ticker_config(symbol)
         capital = config.get("initial_capital_long", 1000)
 
-        print(f"[{symbol}] Fetching 1h data...")
+        # Calculate ETA
+        elapsed = time.time() - start_time
+        if idx > 1:
+            avg_per_symbol = elapsed / (idx - 1)
+            remaining = avg_per_symbol * (len(symbols) - idx + 1)
+            eta_min = int(remaining / 60)
+            eta_sec = int(remaining % 60)
+            eta_str = f" | ETA: {eta_min}m {eta_sec}s"
+        else:
+            eta_str = ""
+
+        print(f"\n[{idx}/{len(symbols)}] {symbol} - Fetching data...{eta_str}")
         df_1h = fetch_data(symbol, args.period, "1h")
 
         if df_1h is None or len(df_1h) < 100:
-            print(f"[{symbol}] Skipped - insufficient data")
+            print(f"  Skipped - insufficient data")
             continue
 
-        print(f"[{symbol}] Running sweep ({len(df_1h)} bars)...")
+        symbol_start = time.time()
+        print(f"  Running sweep ({len(df_1h)} bars)...")
         results = run_full_sweep(
             symbol=symbol,
             df_1h=df_1h,
@@ -429,6 +468,7 @@ def main():
             quick_mode=args.quick
         )
         all_results.extend(results)
+        symbol_time = time.time() - symbol_start
 
         # Show best for this symbol
         best_long = max([r for r in results if r["direction"] == "long"],
@@ -436,6 +476,7 @@ def main():
         best_short = max([r for r in results if r["direction"] == "short"],
                         key=lambda x: x["total_pnl"], default=None)
 
+        print(f"  Completed in {symbol_time:.1f}s ({len(results)} combinations)")
         if best_long:
             print(f"  LONG:  {best_long['indicator']:10} {best_long['timeframe']:3} "
                   f"A={best_long['param_a']:4} B={best_long['param_b']:5} "
@@ -508,10 +549,15 @@ def main():
     # Summary
     total_pnl = sum(r["total_pnl"] for r in best_configs)
     profitable = sum(1 for r in best_configs if r["total_pnl"] > 0)
+    total_time = time.time() - start_time
+    total_min = int(total_time / 60)
+    total_sec = int(total_time % 60)
 
     print(f"\n{'='*80}")
     print(f"SUMMARY: {profitable}/{len(best_configs)} profitable symbols")
     print(f"Total P&L with best params: ${total_pnl:+,.2f}")
+    print(f"Total combinations tested: {len(all_results):,}")
+    print(f"Total runtime: {total_min}m {total_sec}s")
     print(f"Results saved to {SWEEP_OUTPUT_DIR}/")
     print(f"{'='*80}")
 
