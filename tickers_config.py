@@ -8,7 +8,9 @@ TICKERS = {
         "symbol": "QBTS",
         "conID": 532663595,
         "enabled": True,
-        "indicator": "kama",        # Best: +$602, 26.3% win rate
+        "indicator": "jma",          # Sweep: +$2194, 219%
+        "param_a": 10,
+        "param_b": 0,
         "long": True,
         "short": False,
         "initial_capital_long": 1000,
@@ -20,7 +22,9 @@ TICKERS = {
         "symbol": "INTC",
         "conID": 1977552,
         "enabled": True,
-        "indicator": "supertrend",  # Best: +$522, 43.3% win rate
+        "indicator": "kama",         # Sweep: +$913, 91%
+        "param_a": 30,
+        "param_b": 30,
         "long": True,
         "short": False,
         "initial_capital_long": 1000,
@@ -32,7 +36,9 @@ TICKERS = {
         "symbol": "QUBT",
         "conID": 380357230,
         "enabled": True,
-        "indicator": "supertrend",  # Best: +$382, 31.0% win rate
+        "indicator": "kama",         # Sweep: +$2470, 124%
+        "param_a": 10,
+        "param_b": 20,
         "long": True,
         "short": False,
         "initial_capital_long": 2000,
@@ -44,7 +50,9 @@ TICKERS = {
         "symbol": "NVDA",
         "conID": 4815747,
         "enabled": True,
-        "indicator": "jma",         # Best: +$359, 40.0% win rate
+        "indicator": "kama",         # Sweep: +$947, 53%
+        "param_a": 20,
+        "param_b": 20,
         "long": True,
         "short": False,
         "initial_capital_long": 1800,
@@ -56,7 +64,9 @@ TICKERS = {
         "symbol": "GOOGL",
         "conID": 208813720,
         "enabled": True,
-        "indicator": "kama",        # Best: +$284, 33.8% win rate
+        "indicator": "kama",         # Sweep: +$571, 48%
+        "param_a": 14,
+        "param_b": 50,
         "long": True,
         "short": False,
         "initial_capital_long": 1200,
@@ -228,6 +238,8 @@ def get_best_strategies() -> list:
             strategies.append({
                 "symbol": symbol,
                 "indicator": config.get("indicator", "supertrend"),
+                "param_a": config.get("param_a"),
+                "param_b": config.get("param_b"),
                 "direction": "long" if config.get("long") else "short",
                 "capital": config.get("initial_capital_long", 0) or config.get("initial_capital_short", 1000)
             })

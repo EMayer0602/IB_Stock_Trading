@@ -323,6 +323,8 @@ def run_best_strategies_backtest(period="6mo", interval="1h"):
     for strat in strategies:
         symbol = strat["symbol"]
         indicator = strat["indicator"]
+        param_a = strat.get("param_a")
+        param_b = strat.get("param_b")
         direction = strat["direction"]
         capital = strat["capital"]
 
@@ -331,9 +333,12 @@ def run_best_strategies_backtest(period="6mo", interval="1h"):
         if df is None or len(df) < 50:
             print(f"[{symbol}] Skipped")
             continue
-        print(f"[{symbol}] {len(df)} bars | {indicator} | {direction}")
+        param_str = f"A={param_a} B={param_b}" if param_a is not None else "default"
+        print(f"[{symbol}] {len(df)} bars | {indicator} ({param_str}) | {direction}")
 
-        trades, result, equity_df = run_backtest_for_symbol(symbol, df, indicator, direction, capital)
+        trades, result, equity_df = run_backtest_for_symbol(
+            symbol, df, indicator, direction, capital, param_a=param_a, param_b=param_b
+        )
         all_trades.extend(trades)
         all_results.append(result)
 
