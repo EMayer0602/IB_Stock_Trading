@@ -70,7 +70,16 @@ MIN_HOLD_BARS = [0, 6, 12, 24, 48]
 # HTF Filter settings
 HTF_CONFIGS = [
     {"enabled": False, "htf": None, "length": None, "factor": None},
+    {"enabled": True, "htf": "3h", "length": 14, "factor": 2.5},
     {"enabled": True, "htf": "4h", "length": 14, "factor": 2.0},
+    {"enabled": True, "htf": "4h", "length": 20, "factor": 3.0},
+    {"enabled": True, "htf": "5h", "length": 14, "factor": 2.5},
+    {"enabled": True, "htf": "6h", "length": 14, "factor": 2.0},
+    {"enabled": True, "htf": "6h", "length": 20, "factor": 3.0},
+    {"enabled": True, "htf": "8h", "length": 14, "factor": 2.5},
+    {"enabled": True, "htf": "8h", "length": 20, "factor": 2.0},
+    {"enabled": True, "htf": "12h", "length": 10, "factor": 3.0},
+    {"enabled": True, "htf": "12h", "length": 20, "factor": 2.5},
     {"enabled": True, "htf": "1d", "length": 10, "factor": 3.0},
     {"enabled": True, "htf": "1d", "length": 20, "factor": 2.5},
 ]
@@ -102,7 +111,10 @@ def resample_to_timeframe(df: pd.DataFrame, target_tf: str) -> pd.DataFrame:
     if target_tf == "1h":
         return df
 
-    tf_map = {"2h": "2H", "4h": "4H", "1d": "1D"}
+    tf_map = {
+        "2h": "2H", "3h": "3H", "4h": "4H", "5h": "5H",
+        "6h": "6H", "8h": "8H", "12h": "12H", "1d": "1D"
+    }
     rule = tf_map.get(target_tf, target_tf.upper())
 
     resampled = df.resample(rule).agg({
