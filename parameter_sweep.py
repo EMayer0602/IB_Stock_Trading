@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Parameter Sweep for IB Stock Trading - Find optimal parameters.
+Enhanced Parameter Sweep for IB Stock Trading.
+Optimizes: indicator params, direction, timeframes, HTF filter, hold times.
 """
 
 import os
@@ -8,9 +9,10 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass, asdict
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Dict
 from zoneinfo import ZoneInfo
 import itertools
+import json
 
 import pandas as pd
 import numpy as np
@@ -19,7 +21,12 @@ try:
     import yfinance as yf
     YF_AVAILABLE = True
 except ImportError:
-    YF_AVAILABLE = False
+    try:
+        import simple_yf as yf
+        YF_AVAILABLE = True
+        print("[Info] Using simple_yf fallback")
+    except ImportError:
+        YF_AVAILABLE = False
 
 from tickers_config import TICKERS, SYMBOLS, get_ticker_config
 import supertrend_strategy as st
@@ -29,8 +36,52 @@ SWEEP_OUTPUT_DIR = "sweep_results"
 FEE_RATE = 0.001
 
 
-def fetch_historical_data(symbol: str, period: str = "1y", interval: str = "1h") -> Optional[pd.DataFrame]:
-    """Fetch historical data using yfinance."""
+# =============================================================================
+# Parameter Grids
+# =============================================================================
+
+INDICATOR_PARAMS = {
+    "supertrend": {
+        "param_a": [7, 10, 14, 20],           # Length
+        "param_b": [1.5, 2.0, 2.5, 3.0, 4.0]  # Factor
+    },
+    "jma": {
+        "param_a": [10, 20, 30, 50],          # Length
+        "param_b": [-50, 0, 50]               # Phase
+    },
+    "kama": {
+        "param_a": [10, 14, 20, 30],          # Fast length
+        "param_b": [20, 30, 40, 50]           # Slow length
+    }
+}
+
+# Timeframes to test
+TIMEFRAMES = ["1h", "2h", "4h"]
+
+# Directions
+DIRECTIONS = ["long", "short"]
+
+# ATR stop multipliers
+ATR_MULTS = [None, 1.0, 1.5, 2.0, 2.5]
+
+# Minimum hold bars
+MIN_HOLD_BARS = [0, 6, 12, 24, 48]
+
+# HTF Filter settings
+HTF_CONFIGS = [
+    {"enabled": False, "htf": None, "length": None, "factor": None},
+    {"enabled": True, "htf": "4h", "length": 14, "factor": 2.0},
+    {"enabled": True, "htf": "1d", "length": 10, "factor": 3.0},
+    {"enabled": True, "htf": "1d", "length": 20, "factor": 2.5},
+]
+
+
+# =============================================================================
+# Data Fetching
+# =============================================================================
+
+def fetch_data(symbol: str, period: str = "1y", interval: str = "1h") -> Optional[pd.DataFrame]:
+    """Fetch historical data with ATR calculation."""
     if not YF_AVAILABLE:
         return None
     try:
@@ -42,34 +93,83 @@ def fetch_historical_data(symbol: str, period: str = "1y", interval: str = "1h")
         df["atr"] = st.calculate_atr(df, st.ATR_WINDOW)
         return df
     except Exception as e:
-        print(f"[Sweep] Error fetching {symbol}: {e}")
+        print(f"[Sweep] Error fetching {symbol} {interval}: {e}")
         return None
 
 
-def run_single_backtest(
+def resample_to_timeframe(df: pd.DataFrame, target_tf: str) -> pd.DataFrame:
+    """Resample 1h data to higher timeframe."""
+    if target_tf == "1h":
+        return df
+
+    tf_map = {"2h": "2H", "4h": "4H", "1d": "1D"}
+    rule = tf_map.get(target_tf, target_tf.upper())
+
+    resampled = df.resample(rule).agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum'
+    }).dropna()
+
+    resampled["atr"] = st.calculate_atr(resampled, st.ATR_WINDOW)
+    return resampled
+
+
+# =============================================================================
+# Backtest Engine
+# =============================================================================
+
+def run_backtest(
     df: pd.DataFrame,
     indicator: str,
+    direction: str,
     param_a: float,
     param_b: float,
-    atr_mult: float,
+    atr_mult: Optional[float],
     min_hold_bars: int,
+    htf_df: Optional[pd.DataFrame] = None,
+    htf_config: Optional[Dict] = None,
     initial_capital: float = 1000
 ) -> Dict:
     """Run a single backtest with specific parameters."""
 
+    # Generate signals
     signals = st.generate_indicator_signals(df, indicator, param_a, param_b)
+
+    # HTF filter signals (if enabled)
+    htf_signals = None
+    if htf_config and htf_config.get("enabled") and htf_df is not None:
+        htf_signals = st.generate_indicator_signals(
+            htf_df, indicator,
+            htf_config.get("length", param_a),
+            htf_config.get("factor", param_b)
+        )
+        # Reindex to match main timeframe
+        htf_signals = htf_signals.reindex(df.index, method='ffill')
 
     equity = initial_capital
     position = None
     trades = []
     max_equity = equity
     max_drawdown = 0
+    equity_curve = [equity]
 
     for i in range(1, len(df)):
         current_price = df["close"].iloc[i]
         current_signal = signals.iloc[i]
         prev_signal = signals.iloc[i - 1]
         current_atr = df["atr"].iloc[i] if "atr" in df.columns else 0
+
+        # HTF filter check
+        htf_aligned = True
+        if htf_signals is not None:
+            htf_signal = htf_signals.iloc[i] if i < len(htf_signals) else 0
+            if direction == "long" and htf_signal != 1:
+                htf_aligned = False
+            elif direction == "short" and htf_signal != -1:
+                htf_aligned = False
 
         # Track drawdown
         if equity > max_equity:
@@ -84,25 +184,42 @@ def run_single_backtest(
             should_exit = False
 
             if position["bars_held"] >= min_hold_bars:
-                # Trend flip
-                if current_signal == -1:
+                # Trend flip exit
+                if direction == "long" and current_signal == -1:
                     should_exit = True
+                elif direction == "short" and current_signal == 1:
+                    should_exit = True
+
                 # ATR stop
-                elif atr_mult and current_atr > 0:
-                    stop_price = position["entry_price"] - atr_mult * current_atr
-                    if current_price < stop_price:
-                        should_exit = True
+                if not should_exit and atr_mult and current_atr > 0:
+                    if direction == "long":
+                        stop_price = position["entry_price"] - atr_mult * current_atr
+                        if current_price < stop_price:
+                            should_exit = True
+                    else:
+                        stop_price = position["entry_price"] + atr_mult * current_atr
+                        if current_price > stop_price:
+                            should_exit = True
 
             if should_exit:
-                pnl = (current_price - position["entry_price"]) * position["quantity"]
+                if direction == "long":
+                    pnl = (current_price - position["entry_price"]) * position["quantity"]
+                else:
+                    pnl = (position["entry_price"] - current_price) * position["quantity"]
                 fees = position["stake"] * FEE_RATE * 2
                 equity += pnl - fees
                 trades.append({"pnl": pnl - fees, "win": pnl > fees})
                 position = None
 
-        # Entry logic (long only)
-        if position is None and current_signal == 1 and prev_signal != 1:
-            if equity > 100:
+        # Entry logic
+        if position is None and htf_aligned:
+            should_enter = False
+            if direction == "long" and current_signal == 1 and prev_signal != 1:
+                should_enter = True
+            elif direction == "short" and current_signal == -1 and prev_signal != -1:
+                should_enter = True
+
+            if should_enter and equity > 100:
                 stake = min(equity * 0.9, initial_capital)
                 quantity = int(stake / current_price)
                 if quantity > 0:
@@ -113,10 +230,15 @@ def run_single_backtest(
                         "bars_held": 0
                     }
 
+        equity_curve.append(equity)
+
     # Close remaining position
     if position is not None:
         current_price = df["close"].iloc[-1]
-        pnl = (current_price - position["entry_price"]) * position["quantity"]
+        if direction == "long":
+            pnl = (current_price - position["entry_price"]) * position["quantity"]
+        else:
+            pnl = (position["entry_price"] - current_price) * position["quantity"]
         fees = position["stake"] * FEE_RATE * 2
         equity += pnl - fees
         trades.append({"pnl": pnl - fees, "win": pnl > fees})
@@ -137,71 +259,140 @@ def run_single_backtest(
     }
 
 
-def run_parameter_sweep(
+# =============================================================================
+# Parameter Sweep
+# =============================================================================
+
+def run_full_sweep(
     symbol: str,
-    df: pd.DataFrame,
-    indicator: str = "supertrend",
-    initial_capital: float = 1000
+    df_1h: pd.DataFrame,
+    indicators: List[str] = None,
+    directions: List[str] = None,
+    timeframes: List[str] = None,
+    initial_capital: float = 1000,
+    quick_mode: bool = False
 ) -> List[Dict]:
-    """Run parameter sweep for a symbol."""
+    """Run comprehensive parameter sweep."""
+
+    if indicators is None:
+        indicators = list(INDICATOR_PARAMS.keys())
+    if directions is None:
+        directions = DIRECTIONS
+    if timeframes is None:
+        timeframes = TIMEFRAMES if not quick_mode else ["1h"]
+
+    # Pre-compute resampled dataframes
+    df_cache = {"1h": df_1h}
+    for tf in timeframes:
+        if tf not in df_cache:
+            df_cache[tf] = resample_to_timeframe(df_1h, tf)
+
+    # Pre-compute HTF dataframes
+    htf_cache = {}
+    for htf_config in HTF_CONFIGS:
+        if htf_config["enabled"]:
+            htf = htf_config["htf"]
+            if htf not in htf_cache:
+                htf_cache[htf] = resample_to_timeframe(df_1h, htf)
 
     results = []
 
-    # Parameter ranges based on indicator
-    if indicator == "supertrend":
-        param_a_values = [7, 10, 14, 20]
-        param_b_values = [1.5, 2.0, 2.5, 3.0, 4.0]
-    elif indicator == "jma":
-        param_a_values = [10, 20, 30, 50]
-        param_b_values = [-50, 0, 50]
-    elif indicator == "kama":
-        param_a_values = [10, 14, 20, 30]
-        param_b_values = [20, 30, 40, 50]
-    else:
-        param_a_values = [10, 20]
-        param_b_values = [0]
+    # Reduced grids for quick mode
+    atr_mults = ATR_MULTS if not quick_mode else [1.5, 2.0, None]
+    min_holds = MIN_HOLD_BARS if not quick_mode else [0, 12, 24]
+    htf_configs = HTF_CONFIGS if not quick_mode else [HTF_CONFIGS[0], HTF_CONFIGS[2]]
 
-    atr_mult_values = [1.0, 1.5, 2.0, 2.5, None]
-    min_hold_values = [0, 6, 12, 24]
+    for indicator in indicators:
+        params = INDICATOR_PARAMS[indicator]
+        param_a_vals = params["param_a"]
+        param_b_vals = params["param_b"]
 
-    total_combos = len(param_a_values) * len(param_b_values) * len(atr_mult_values) * len(min_hold_values)
+        for direction in directions:
+            for timeframe in timeframes:
+                df = df_cache[timeframe]
 
-    for param_a, param_b, atr_mult, min_hold in itertools.product(
-        param_a_values, param_b_values, atr_mult_values, min_hold_values
-    ):
-        result = run_single_backtest(
-            df, indicator, param_a, param_b, atr_mult, min_hold, initial_capital
-        )
+                for param_a, param_b in itertools.product(param_a_vals, param_b_vals):
+                    for atr_mult in atr_mults:
+                        for min_hold in min_holds:
+                            for htf_config in htf_configs:
+                                # Get HTF dataframe if needed
+                                htf_df = None
+                                if htf_config["enabled"]:
+                                    htf_df = htf_cache.get(htf_config["htf"])
 
-        result.update({
-            "symbol": symbol,
-            "indicator": indicator,
-            "param_a": param_a,
-            "param_b": param_b,
-            "atr_mult": atr_mult if atr_mult else 0,
-            "min_hold_bars": min_hold
-        })
+                                result = run_backtest(
+                                    df=df,
+                                    indicator=indicator,
+                                    direction=direction,
+                                    param_a=param_a,
+                                    param_b=param_b,
+                                    atr_mult=atr_mult,
+                                    min_hold_bars=min_hold,
+                                    htf_df=htf_df,
+                                    htf_config=htf_config,
+                                    initial_capital=initial_capital
+                                )
 
-        results.append(result)
+                                result.update({
+                                    "symbol": symbol,
+                                    "indicator": indicator,
+                                    "direction": direction,
+                                    "timeframe": timeframe,
+                                    "param_a": param_a,
+                                    "param_b": param_b,
+                                    "atr_mult": atr_mult if atr_mult else 0,
+                                    "min_hold_bars": min_hold,
+                                    "htf_enabled": htf_config["enabled"],
+                                    "htf_timeframe": htf_config.get("htf", ""),
+                                    "htf_length": htf_config.get("length", 0),
+                                    "htf_factor": htf_config.get("factor", 0)
+                                })
+
+                                results.append(result)
 
     return results
 
 
+def find_best_per_symbol(results: List[Dict]) -> Dict[str, Dict]:
+    """Find best parameters per symbol (considering both long and short)."""
+    best = {}
+
+    for r in results:
+        symbol = r["symbol"]
+        direction = r["direction"]
+        key = f"{symbol}_{direction}"
+
+        if key not in best or r["total_pnl"] > best[key]["total_pnl"]:
+            best[key] = r
+
+    return best
+
+
+# =============================================================================
+# Main
+# =============================================================================
+
 def main():
-    parser = argparse.ArgumentParser(description="IB Stock Parameter Sweep")
-    parser.add_argument("--period", default="1y", help="Data period")
+    parser = argparse.ArgumentParser(description="Enhanced IB Stock Parameter Sweep")
+    parser.add_argument("--period", default="1y", help="Data period: 6mo, 1y, 2y")
     parser.add_argument("--symbols", nargs="+", help="Symbols to test")
-    parser.add_argument("--indicator", default="jma", help="Indicator to optimize")
-    parser.add_argument("--top", type=int, default=10, help="Show top N results")
+    parser.add_argument("--indicator", help="Single indicator (default: all)")
+    parser.add_argument("--direction", choices=["long", "short"], help="Single direction")
+    parser.add_argument("--quick", action="store_true", help="Quick mode (reduced grid)")
+    parser.add_argument("--top", type=int, default=15, help="Show top N results")
     args = parser.parse_args()
 
     symbols = args.symbols or SYMBOLS
-    indicator = args.indicator
+    indicators = [args.indicator] if args.indicator else None
+    directions = [args.direction] if args.direction else None
 
-    print(f"\n{'='*70}")
-    print(f"IB STOCK TRADING - PARAMETER SWEEP")
-    print(f"Indicator: {indicator} | Period: {args.period} | Symbols: {len(symbols)}")
-    print(f"{'='*70}\n")
+    print(f"\n{'='*80}")
+    print(f"ENHANCED PARAMETER SWEEP")
+    print(f"{'='*80}")
+    print(f"Symbols: {len(symbols)} | Period: {args.period} | Quick: {args.quick}")
+    print(f"Indicators: {indicators or 'all'} | Directions: {directions or 'all'}")
+    print(f"Timeframes: {TIMEFRAMES} | HTF Configs: {len(HTF_CONFIGS)}")
+    print(f"{'='*80}\n")
 
     all_results = []
 
@@ -209,70 +400,108 @@ def main():
         config = get_ticker_config(symbol)
         capital = config.get("initial_capital_long", 1000)
 
-        print(f"[{symbol}] Fetching data...")
-        df = fetch_historical_data(symbol, args.period, "1h")
+        print(f"[{symbol}] Fetching 1h data...")
+        df_1h = fetch_data(symbol, args.period, "1h")
 
-        if df is None or len(df) < 100:
+        if df_1h is None or len(df_1h) < 100:
             print(f"[{symbol}] Skipped - insufficient data")
             continue
 
-        print(f"[{symbol}] Running sweep ({len(df)} bars)...")
-        results = run_parameter_sweep(symbol, df, indicator, capital)
+        print(f"[{symbol}] Running sweep ({len(df_1h)} bars)...")
+        results = run_full_sweep(
+            symbol=symbol,
+            df_1h=df_1h,
+            indicators=indicators,
+            directions=directions,
+            initial_capital=capital,
+            quick_mode=args.quick
+        )
         all_results.extend(results)
 
         # Show best for this symbol
-        best = max(results, key=lambda x: x["total_pnl"])
-        print(f"[{symbol}] Best: ParamA={best['param_a']}, ParamB={best['param_b']}, "
-              f"ATR={best['atr_mult']}, Hold={best['min_hold_bars']} -> ${best['total_pnl']:+.2f} ({best['return_pct']:+.1f}%)")
+        best_long = max([r for r in results if r["direction"] == "long"],
+                       key=lambda x: x["total_pnl"], default=None)
+        best_short = max([r for r in results if r["direction"] == "short"],
+                        key=lambda x: x["total_pnl"], default=None)
+
+        if best_long:
+            print(f"  LONG:  {best_long['indicator']:10} {best_long['timeframe']:3} "
+                  f"A={best_long['param_a']:4} B={best_long['param_b']:5} "
+                  f"-> ${best_long['total_pnl']:+8.2f} ({best_long['return_pct']:+5.1f}%)")
+        if best_short:
+            print(f"  SHORT: {best_short['indicator']:10} {best_short['timeframe']:3} "
+                  f"A={best_short['param_a']:4} B={best_short['param_b']:5} "
+                  f"-> ${best_short['total_pnl']:+8.2f} ({best_short['return_pct']:+5.1f}%)")
+
+    if not all_results:
+        print("No results to save.")
+        return
 
     # Save all results
     Path(SWEEP_OUTPUT_DIR).mkdir(exist_ok=True)
     results_df = pd.DataFrame(all_results)
-    results_df.to_csv(f"{SWEEP_OUTPUT_DIR}/sweep_{indicator}.csv", index=False)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_df.to_csv(f"{SWEEP_OUTPUT_DIR}/sweep_full_{timestamp}.csv", index=False)
 
     # Show top results
-    print(f"\n{'='*70}")
-    print(f"TOP {args.top} PARAMETER COMBINATIONS")
-    print(f"{'='*70}")
+    print(f"\n{'='*80}")
+    print(f"TOP {args.top} PARAMETER COMBINATIONS (by P&L)")
+    print(f"{'='*80}")
 
     sorted_results = sorted(all_results, key=lambda x: x["total_pnl"], reverse=True)
 
     for i, r in enumerate(sorted_results[:args.top], 1):
-        print(f"{i:2}. {r['symbol']:6} | A={r['param_a']:4}, B={r['param_b']:5}, "
-              f"ATR={r['atr_mult']:3}, Hold={r['min_hold_bars']:2} | "
-              f"{r['total_trades']:3} trades | WR={r['win_rate']*100:4.1f}% | "
-              f"${r['total_pnl']:+8.2f} | DD={r['max_drawdown']:4.1f}%")
+        htf_str = f"HTF:{r['htf_timeframe']}" if r['htf_enabled'] else "no-HTF"
+        print(f"{i:2}. {r['symbol']:5} {r['direction']:5} {r['indicator']:10} {r['timeframe']:3} | "
+              f"A={r['param_a']:4} B={r['param_b']:5} ATR={r['atr_mult']:3} Hold={r['min_hold_bars']:2} {htf_str:8} | "
+              f"{r['total_trades']:3}T WR={r['win_rate']*100:4.1f}% ${r['total_pnl']:+8.2f}")
 
-    # Summary by symbol
-    print(f"\n{'='*70}")
-    print("BEST PARAMETERS PER SYMBOL (Long Only)")
-    print(f"{'='*70}")
+    # Best per symbol/direction
+    print(f"\n{'='*80}")
+    print("BEST PARAMETERS PER SYMBOL")
+    print(f"{'='*80}")
 
-    best_params = []
+    best_configs = []
     for symbol in symbols:
         symbol_results = [r for r in all_results if r["symbol"] == symbol]
-        if symbol_results:
-            best = max(symbol_results, key=lambda x: x["total_pnl"])
-            best_params.append(best)
-            status = "✓" if best["total_pnl"] > 0 else "✗"
-            print(f"{status} {symbol:6} | {indicator} A={best['param_a']:4} B={best['param_b']:5} "
-                  f"ATR={best['atr_mult']:3} Hold={best['min_hold_bars']:2} | "
-                  f"${best['total_pnl']:+8.2f} ({best['return_pct']:+5.1f}%) | WR={best['win_rate']*100:.0f}%")
+        if not symbol_results:
+            continue
 
-    # Save best params
-    best_df = pd.DataFrame(best_params)
-    best_df.to_csv(f"{SWEEP_OUTPUT_DIR}/best_params_{indicator}.csv", index=False)
+        # Best overall for this symbol (long or short)
+        best = max(symbol_results, key=lambda x: x["total_pnl"])
+        best_configs.append(best)
 
-    # Total
-    total_pnl = sum(r["total_pnl"] for r in best_params)
-    total_capital = sum(get_ticker_config(r["symbol"]).get("initial_capital_long", 1000) for r in best_params)
-    profitable = sum(1 for r in best_params if r["total_pnl"] > 0)
+        status = "+" if best["total_pnl"] > 0 else "-"
+        htf_str = f"HTF:{best['htf_timeframe']}" if best['htf_enabled'] else ""
+        print(f"{status} {best['symbol']:5} {best['direction']:5} {best['indicator']:10} {best['timeframe']:3} | "
+              f"A={best['param_a']:4} B={best['param_b']:5} ATR={best['atr_mult']:3} Hold={best['min_hold_bars']:2} {htf_str:8} | "
+              f"${best['total_pnl']:+8.2f} ({best['return_pct']:+5.1f}%) WR={best['win_rate']*100:.0f}%")
 
-    print(f"\n{'='*70}")
-    print(f"SUMMARY: {profitable}/{len(best_params)} profitable symbols")
-    print(f"Total P&L with best params: ${total_pnl:+,.2f} ({total_pnl/total_capital*100:+.1f}%)")
+    # Save best configs
+    best_df = pd.DataFrame(best_configs)
+    best_df.to_csv(f"{SWEEP_OUTPUT_DIR}/best_params_{timestamp}.csv", index=False)
+
+    # Generate config update suggestion
+    print(f"\n{'='*80}")
+    print("SUGGESTED tickers_config.py UPDATE:")
+    print(f"{'='*80}")
+
+    for b in best_configs:
+        if b["total_pnl"] > 0:
+            print(f'    "{b["symbol"]}": {{"indicator": "{b["indicator"]}", '
+                  f'"direction": "{b["direction"]}", "timeframe": "{b["timeframe"]}", '
+                  f'"param_a": {b["param_a"]}, "param_b": {b["param_b"]}, '
+                  f'"atr_mult": {b["atr_mult"]}, "min_hold": {b["min_hold_bars"]}}},')
+
+    # Summary
+    total_pnl = sum(r["total_pnl"] for r in best_configs)
+    profitable = sum(1 for r in best_configs if r["total_pnl"] > 0)
+
+    print(f"\n{'='*80}")
+    print(f"SUMMARY: {profitable}/{len(best_configs)} profitable symbols")
+    print(f"Total P&L with best params: ${total_pnl:+,.2f}")
     print(f"Results saved to {SWEEP_OUTPUT_DIR}/")
-    print(f"{'='*70}")
+    print(f"{'='*80}")
 
 
 if __name__ == "__main__":
