@@ -378,9 +378,11 @@ def run_full_sweep(
                                 current += 1
                                 if show_progress:
                                     pct = int(current * 100 / total_combinations)
-                                    if pct != last_pct and pct % 5 == 0:
+                                    # Update every 1% or every 500 iterations for large sweeps
+                                    should_update = (pct != last_pct) or (current % 500 == 0)
+                                    if should_update:
                                         best_so_far = max((r["total_pnl"] for r in results), default=0)
-                                        print(f"\r  [{symbol}] {pct:3d}% ({current}/{total_combinations}) "
+                                        print(f"\r  [{symbol}] {pct:3d}% ({current:,}/{total_combinations:,}) "
                                               f"Best: ${best_so_far:+.2f}    ", end="", flush=True)
                                         last_pct = pct
 
@@ -423,12 +425,29 @@ def main():
     indicators = [args.indicator] if args.indicator else None
     directions = [args.direction] if args.direction else None
 
+    # Calculate estimated combinations
+    est_per_symbol = 0
+    for ind in (indicators or list(INDICATOR_PARAMS.keys())):
+        params = INDICATOR_PARAMS[ind]
+        param_combos = len(params["param_a"]) * len(params["param_b"])
+        dirs = directions or DIRECTIONS
+        tfs = TIMEFRAMES if not args.quick else ["1h"]
+        atrs = ATR_MULTS if not args.quick else [1.5, 2.0, None]
+        holds = MIN_HOLD_BARS if not args.quick else [0, 12, 24]
+        htfs = HTF_CONFIGS if not args.quick else [HTF_CONFIGS[0], HTF_CONFIGS[2]]
+        est_per_symbol += param_combos * len(dirs) * len(tfs) * len(atrs) * len(holds) * len(htfs)
+
+    total_est = est_per_symbol * len(symbols)
+
     print(f"\n{'='*80}")
     print(f"ENHANCED PARAMETER SWEEP")
     print(f"{'='*80}")
     print(f"Symbols: {len(symbols)} | Period: {args.period} | Quick: {args.quick}")
     print(f"Indicators: {indicators or 'all'} | Directions: {directions or 'all'}")
-    print(f"Timeframes: {TIMEFRAMES} | HTF Configs: {len(HTF_CONFIGS)}")
+    print(f"Timeframes: {TIMEFRAMES if not args.quick else ['1h']} | HTF Configs: {len(HTF_CONFIGS) if not args.quick else 2}")
+    print(f"Estimated combinations: {total_est:,} ({est_per_symbol:,} per symbol)")
+    if not args.quick and total_est > 100000:
+        print(f"⚠️  Large sweep! Consider using --quick for faster results")
     print(f"{'='*80}\n")
 
     all_results = []
