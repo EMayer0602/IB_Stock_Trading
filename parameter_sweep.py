@@ -266,7 +266,7 @@ def run_backtest(
         "win_rate": win_rate,
         "total_pnl": total_pnl,
         "final_equity": equity,
-        "return_pct": (equity - initial_capital) / initial_capital * 100,
+        "return_pct": (equity - initial_capital) / initial_capital * 100 if initial_capital > 0 else 0,
         "max_drawdown": max_drawdown * 100
     }
 
@@ -456,7 +456,7 @@ def main():
 
     for idx, symbol in enumerate(symbols, 1):
         config = get_ticker_config(symbol)
-        capital = config.get("initial_capital_long", 1000)
+        capital = config.get("initial_capital_long", 1000) or 1000  # Ensure non-zero
 
         # Calculate ETA
         elapsed = time.time() - start_time
