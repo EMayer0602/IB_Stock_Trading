@@ -93,9 +93,20 @@ def fetch_historical_data(symbol: str, period: str = "6mo", interval: str = "1h"
         return None
 
 
-def run_backtest_for_symbol(symbol, df, indicator="supertrend", direction="long", 
+def get_htf_signal_for_time(htf_signals, current_time):
+    """Get the HTF signal for a given time (use last available HTF bar)."""
+    if htf_signals is None or htf_signals.empty:
+        return 0  # No filter if no HTF data
+    # Find the latest HTF signal before or at current_time
+    valid_signals = htf_signals[htf_signals.index <= current_time]
+    if valid_signals.empty:
+        return 0
+    return valid_signals.iloc[-1]
+
+
+def run_backtest_for_symbol(symbol, df, indicator="supertrend", direction="long",
                             initial_capital=1000, param_a=None, param_b=None,
-                            atr_mult=1.5, min_hold_bars=6):
+                            atr_mult=1.5, min_hold_bars=6, htf_signals=None, use_htf_filter=True):
     preset = st.INDICATOR_PRESETS.get(indicator, {})
     if param_a is None:
         param_a = preset.get("default_a", 10)
@@ -114,6 +125,9 @@ def run_backtest_for_symbol(symbol, df, indicator="supertrend", direction="long"
         current_signal = signals.iloc[i]
         prev_signal = signals.iloc[i - 1]
         current_atr = df["atr"].iloc[i] if "atr" in df.columns else 0
+
+        # Get HTF signal for current time
+        htf_signal = get_htf_signal_for_time(htf_signals, current_time) if use_htf_filter else 0
 
         if position is not None:
             position["bars_held"] += 1
@@ -154,9 +168,13 @@ def run_backtest_for_symbol(symbol, df, indicator="supertrend", direction="long"
         if position is None:
             should_enter = False
             if direction == "long" and current_signal == 1 and prev_signal != 1:
-                should_enter = True
+                # HTF Filter: only enter long if HTF is also bullish (1) or no filter
+                if not use_htf_filter or htf_signals is None or htf_signal == 1:
+                    should_enter = True
             elif direction == "short" and current_signal == -1 and prev_signal != -1:
-                should_enter = True
+                # HTF Filter: only enter short if HTF is also bearish (-1) or no filter
+                if not use_htf_filter or htf_signals is None or htf_signal == -1:
+                    should_enter = True
 
             if should_enter and equity > 100:
                 stake = min(equity * 0.95, initial_capital)
@@ -187,7 +205,7 @@ def run_backtest_for_symbol(symbol, df, indicator="supertrend", direction="long"
 
 
 def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None, directions=None,
-                      start_date=None, end_date=None):
+                      start_date=None, end_date=None, use_htf_filter=False, htf_indicator="kama"):
     if symbols is None:
         symbols = SYMBOLS
     if indicators is None:
@@ -201,8 +219,10 @@ def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None
     else:
         date_desc = period
 
+    htf_desc = f" + HTF Filter ({htf_indicator.upper()})" if use_htf_filter else ""
+
     print(f"\n{'='*60}")
-    print(f"IB STOCK TRADING BACKTEST - {date_desc}")
+    print(f"IB STOCK TRADING BACKTEST - {date_desc}{htf_desc}")
     print(f"{'='*60}\n")
 
     all_trades, all_results = [], []
@@ -214,12 +234,27 @@ def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None
         if df is None or len(df) < 50:
             print(f"[{symbol}] Skipped")
             continue
-        print(f"[{symbol}] {len(df)} bars")
+
+        # Fetch HTF (daily) data if HTF filter is enabled
+        htf_signals = None
+        if use_htf_filter:
+            htf_df = fetch_historical_data(symbol, period, "1d", start_date, end_date)
+            if htf_df is not None and len(htf_df) > 10:
+                htf_preset = st.INDICATOR_PRESETS.get(htf_indicator, {})
+                htf_param_a = htf_preset.get("default_a", 14)
+                htf_param_b = htf_preset.get("default_b", 30)
+                htf_signals = st.generate_indicator_signals(htf_df, htf_indicator, htf_param_a, htf_param_b)
+                print(f"[{symbol}] {len(df)} bars + HTF ({len(htf_df)} daily bars)")
+            else:
+                print(f"[{symbol}] {len(df)} bars (no HTF data)")
+        else:
+            print(f"[{symbol}] {len(df)} bars")
 
         for indicator in indicators:
             for direction in directions:
                 capital = config.get(f"initial_capital_{direction}", 1000)
-                trades, result = run_backtest_for_symbol(symbol, df, indicator, direction, capital)
+                trades, result = run_backtest_for_symbol(symbol, df, indicator, direction, capital,
+                                                         htf_signals=htf_signals, use_htf_filter=use_htf_filter)
                 all_trades.extend(trades)
                 all_results.append(result)
                 pnl = f"+${result.total_pnl:.2f}" if result.total_pnl >= 0 else f"-${abs(result.total_pnl):.2f}"
@@ -251,10 +286,12 @@ if __name__ == "__main__":
     parser.add_argument("--long-only", action="store_true")
     parser.add_argument("--start", help="Start date YYYY-MM-DD (use with --end)")
     parser.add_argument("--end", help="End date YYYY-MM-DD (use with --start)")
+    parser.add_argument("--htf", action="store_true", help="Enable HTF (daily) trend filter")
+    parser.add_argument("--htf-indicator", default="kama", help="HTF indicator: kama, supertrend, jma")
     args = parser.parse_args()
 
     symbols = args.symbols or SYMBOLS
     indicators = [args.indicator] if args.indicator else None
     directions = ["long"] if args.long_only else ["long", "short"]
     run_full_backtest(symbols, args.period, args.interval, indicators, directions,
-                      args.start, args.end)
+                      args.start, args.end, args.htf, args.htf_indicator)
