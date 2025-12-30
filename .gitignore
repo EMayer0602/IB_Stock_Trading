@@ -37,3 +37,7 @@ config_local.py
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated charts
+trading_chart.html
+equity_curve.html
