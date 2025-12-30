@@ -106,7 +106,24 @@ def get_htf_signal_for_time(htf_signals, current_time):
 
 def run_backtest_for_symbol(symbol, df, indicator="supertrend", direction="long",
                             initial_capital=1000, param_a=None, param_b=None,
-                            atr_mult=1.5, min_hold_bars=6, htf_signals=None, use_htf_filter=True):
+                            atr_mult=1.5, min_hold_bars=6, htf_signals=None, use_htf_filter=True,
+                            htf_indicator=None):
+    """Run backtest for a single symbol/indicator/direction combination.
+
+    Args:
+        symbol: Stock symbol
+        df: OHLCV DataFrame
+        indicator: Entry indicator (supertrend, kama, jma, psar)
+        direction: Trade direction (long, short)
+        initial_capital: Starting capital
+        param_a: Indicator parameter A (e.g., length for supertrend)
+        param_b: Indicator parameter B (e.g., factor for supertrend)
+        atr_mult: ATR multiplier for stop loss
+        min_hold_bars: Minimum bars to hold before exit
+        htf_signals: Pre-calculated HTF signals for filtering
+        use_htf_filter: Whether to use HTF trend filter
+        htf_indicator: Name of HTF indicator used (for logging)
+    """
     preset = st.INDICATOR_PRESETS.get(indicator, {})
     if param_a is None:
         param_a = preset.get("default_a", 10)
@@ -204,14 +221,63 @@ def run_backtest_for_symbol(symbol, df, indicator="supertrend", direction="long"
     return trades, result
 
 
+@dataclass
+class DirectionConfig:
+    """Configuration for a single direction (long or short)."""
+    enabled: bool = True
+    indicators: List[str] = None
+    param_a: float = None
+    param_b: float = None
+    atr_mult: float = 1.5
+    min_hold_bars: int = 6
+    htf_filter: bool = False
+    htf_indicator: str = "kama"
+
+    def __post_init__(self):
+        if self.indicators is None:
+            self.indicators = ["supertrend"]
+
+
 def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None, directions=None,
-                      start_date=None, end_date=None, use_htf_filter=False, htf_indicator="kama"):
+                      start_date=None, end_date=None, use_htf_filter=False, htf_indicator="kama",
+                      long_config=None, short_config=None):
+    """Run full backtest with optional separate long/short configurations.
+
+    Args:
+        symbols: List of symbols to test
+        period: Data period (1mo, 3mo, 6mo, 1y)
+        interval: Data interval (1h, 1d)
+        indicators: List of indicators (used if no separate config)
+        directions: List of directions (used if no separate config)
+        start_date: Start date YYYY-MM-DD
+        end_date: End date YYYY-MM-DD
+        use_htf_filter: Enable HTF filter (used if no separate config)
+        htf_indicator: HTF indicator (used if no separate config)
+        long_config: DirectionConfig for long trades
+        short_config: DirectionConfig for short trades
+    """
     if symbols is None:
         symbols = SYMBOLS
-    if indicators is None:
-        indicators = ["supertrend", "jma", "kama"]
-    if directions is None:
-        directions = ["long"]
+
+    # If no separate configs provided, create from legacy parameters
+    if long_config is None and short_config is None:
+        if indicators is None:
+            indicators = ["supertrend", "jma", "kama"]
+        if directions is None:
+            directions = ["long"]
+
+        long_config = DirectionConfig(
+            enabled="long" in directions,
+            indicators=indicators,
+            htf_filter=use_htf_filter,
+            htf_indicator=htf_indicator
+        )
+        short_config = DirectionConfig(
+            enabled="short" in directions,
+            indicators=indicators,
+            htf_filter=use_htf_filter,
+            htf_indicator=htf_indicator
+        )
 
     # Determine date range description
     if start_date and end_date:
@@ -219,11 +285,18 @@ def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None
     else:
         date_desc = period
 
-    htf_desc = f" + HTF Filter ({htf_indicator.upper()})" if use_htf_filter else ""
+    print(f"\n{'='*70}")
+    print(f"IB STOCK TRADING BACKTEST - {date_desc}")
+    print(f"{'='*70}")
 
-    print(f"\n{'='*60}")
-    print(f"IB STOCK TRADING BACKTEST - {date_desc}{htf_desc}")
-    print(f"{'='*60}\n")
+    # Print configuration summary
+    if long_config.enabled:
+        htf_desc = f" + HTF({long_config.htf_indicator})" if long_config.htf_filter else ""
+        print(f"LONG:  {','.join(long_config.indicators)} | ATR×{long_config.atr_mult} | MinHold={long_config.min_hold_bars}{htf_desc}")
+    if short_config.enabled:
+        htf_desc = f" + HTF({short_config.htf_indicator})" if short_config.htf_filter else ""
+        print(f"SHORT: {','.join(short_config.indicators)} | ATR×{short_config.atr_mult} | MinHold={short_config.min_hold_bars}{htf_desc}")
+    print(f"{'='*70}\n")
 
     all_trades, all_results = [], []
 
@@ -235,30 +308,67 @@ def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None
             print(f"[{symbol}] Skipped")
             continue
 
-        # Fetch HTF (daily) data if HTF filter is enabled
-        htf_signals = None
-        if use_htf_filter:
+        print(f"[{symbol}] {len(df)} bars")
+
+        # Fetch HTF data if needed for either direction
+        htf_signals_long = None
+        htf_signals_short = None
+
+        if long_config.enabled and long_config.htf_filter:
             htf_df = fetch_historical_data(symbol, period, "1d", start_date, end_date)
             if htf_df is not None and len(htf_df) > 10:
-                htf_preset = st.INDICATOR_PRESETS.get(htf_indicator, {})
+                htf_preset = st.INDICATOR_PRESETS.get(long_config.htf_indicator, {})
                 htf_param_a = htf_preset.get("default_a", 14)
                 htf_param_b = htf_preset.get("default_b", 30)
-                htf_signals = st.generate_indicator_signals(htf_df, htf_indicator, htf_param_a, htf_param_b)
-                print(f"[{symbol}] {len(df)} bars + HTF ({len(htf_df)} daily bars)")
-            else:
-                print(f"[{symbol}] {len(df)} bars (no HTF data)")
-        else:
-            print(f"[{symbol}] {len(df)} bars")
+                htf_signals_long = st.generate_indicator_signals(htf_df, long_config.htf_indicator, htf_param_a, htf_param_b)
+                print(f"  HTF Long: {long_config.htf_indicator.upper()} ({len(htf_df)} daily bars)")
 
-        for indicator in indicators:
-            for direction in directions:
-                capital = config.get(f"initial_capital_{direction}", 1000)
-                trades, result = run_backtest_for_symbol(symbol, df, indicator, direction, capital,
-                                                         htf_signals=htf_signals, use_htf_filter=use_htf_filter)
+        if short_config.enabled and short_config.htf_filter:
+            htf_df = fetch_historical_data(symbol, period, "1d", start_date, end_date)
+            if htf_df is not None and len(htf_df) > 10:
+                htf_preset = st.INDICATOR_PRESETS.get(short_config.htf_indicator, {})
+                htf_param_a = htf_preset.get("default_a", 14)
+                htf_param_b = htf_preset.get("default_b", 30)
+                htf_signals_short = st.generate_indicator_signals(htf_df, short_config.htf_indicator, htf_param_a, htf_param_b)
+                print(f"  HTF Short: {short_config.htf_indicator.upper()} ({len(htf_df)} daily bars)")
+
+        # Run long trades
+        if long_config.enabled:
+            for indicator in long_config.indicators:
+                capital = config.get("initial_capital_long", 1000)
+                trades, result = run_backtest_for_symbol(
+                    symbol, df, indicator, "long", capital,
+                    param_a=long_config.param_a,
+                    param_b=long_config.param_b,
+                    atr_mult=long_config.atr_mult,
+                    min_hold_bars=long_config.min_hold_bars,
+                    htf_signals=htf_signals_long,
+                    use_htf_filter=long_config.htf_filter,
+                    htf_indicator=long_config.htf_indicator
+                )
                 all_trades.extend(trades)
                 all_results.append(result)
                 pnl = f"+${result.total_pnl:.2f}" if result.total_pnl >= 0 else f"-${abs(result.total_pnl):.2f}"
-                print(f"  {indicator:12} {direction:5} | {result.total_trades:3} trades | {result.win_rate*100:5.1f}% | {pnl:>10}")
+                print(f"  {indicator:12} long  | {result.total_trades:3} trades | {result.win_rate*100:5.1f}% | {pnl:>10}")
+
+        # Run short trades
+        if short_config.enabled:
+            for indicator in short_config.indicators:
+                capital = config.get("initial_capital_short", 1000)
+                trades, result = run_backtest_for_symbol(
+                    symbol, df, indicator, "short", capital,
+                    param_a=short_config.param_a,
+                    param_b=short_config.param_b,
+                    atr_mult=short_config.atr_mult,
+                    min_hold_bars=short_config.min_hold_bars,
+                    htf_signals=htf_signals_short,
+                    use_htf_filter=short_config.htf_filter,
+                    htf_indicator=short_config.htf_indicator
+                )
+                all_trades.extend(trades)
+                all_results.append(result)
+                pnl = f"+${result.total_pnl:.2f}" if result.total_pnl >= 0 else f"-${abs(result.total_pnl):.2f}"
+                print(f"  {indicator:12} short | {result.total_trades:3} trades | {result.win_rate*100:5.1f}% | {pnl:>10}")
 
     print(f"\n{'='*60}")
     print("SUMMARY")
@@ -278,20 +388,107 @@ def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="IB Stock Backtest")
+    parser = argparse.ArgumentParser(
+        description="IB Stock Backtest with separate Long/Short configurations",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run with default settings (long only)
+  python backtest.py
+
+  # Run both long and short with different indicators
+  python backtest.py --long-indicator supertrend --short-indicator kama
+
+  # Different ATR stops for long vs short
+  python backtest.py --long-atr-mult 1.5 --short-atr-mult 2.5
+
+  # Long with HTF filter, short without
+  python backtest.py --long-htf --long-htf-indicator kama
+
+  # Full example with different settings
+  python backtest.py --long-indicator supertrend --long-atr-mult 1.5 --long-min-hold 6 --long-htf \\
+                     --short-indicator kama --short-atr-mult 2.0 --short-min-hold 12
+"""
+    )
+
+    # General settings
     parser.add_argument("--period", default="6mo", help="Period: 1mo, 3mo, 6mo, 1y")
     parser.add_argument("--interval", default="1h", help="Interval: 1h, 1d")
     parser.add_argument("--symbols", nargs="+", help="Symbols to test")
-    parser.add_argument("--indicator", help="Single indicator")
-    parser.add_argument("--long-only", action="store_true")
-    parser.add_argument("--start", help="Start date YYYY-MM-DD (use with --end)")
-    parser.add_argument("--end", help="End date YYYY-MM-DD (use with --start)")
-    parser.add_argument("--htf", action="store_true", help="Enable HTF (daily) trend filter")
-    parser.add_argument("--htf-indicator", default="kama", help="HTF indicator: kama, supertrend, jma")
-    args = parser.parse_args()
+    parser.add_argument("--start", help="Start date YYYY-MM-DD")
+    parser.add_argument("--end", help="End date YYYY-MM-DD")
 
+    # Legacy single-config options (for backward compatibility)
+    parser.add_argument("--indicator", help="Single indicator for both directions (legacy)")
+    parser.add_argument("--long-only", action="store_true", help="Only run long trades")
+    parser.add_argument("--short-only", action="store_true", help="Only run short trades")
+    parser.add_argument("--htf", action="store_true", help="Enable HTF filter for both (legacy)")
+    parser.add_argument("--htf-indicator", default="kama", help="HTF indicator for both (legacy)")
+
+    # Long-specific settings
+    long_group = parser.add_argument_group("Long Trade Settings")
+    long_group.add_argument("--long-indicator", nargs="+", help="Indicator(s) for long trades")
+    long_group.add_argument("--long-param-a", type=float, help="Param A for long indicator")
+    long_group.add_argument("--long-param-b", type=float, help="Param B for long indicator")
+    long_group.add_argument("--long-atr-mult", type=float, default=1.5, help="ATR multiplier for long stops (default: 1.5)")
+    long_group.add_argument("--long-min-hold", type=int, default=6, help="Min hold bars for long (default: 6)")
+    long_group.add_argument("--long-htf", action="store_true", help="Enable HTF filter for long")
+    long_group.add_argument("--long-htf-indicator", default="kama", help="HTF indicator for long")
+
+    # Short-specific settings
+    short_group = parser.add_argument_group("Short Trade Settings")
+    short_group.add_argument("--short-indicator", nargs="+", help="Indicator(s) for short trades")
+    short_group.add_argument("--short-param-a", type=float, help="Param A for short indicator")
+    short_group.add_argument("--short-param-b", type=float, help="Param B for short indicator")
+    short_group.add_argument("--short-atr-mult", type=float, default=2.0, help="ATR multiplier for short stops (default: 2.0)")
+    short_group.add_argument("--short-min-hold", type=int, default=8, help="Min hold bars for short (default: 8)")
+    short_group.add_argument("--short-htf", action="store_true", help="Enable HTF filter for short")
+    short_group.add_argument("--short-htf-indicator", default="kama", help="HTF indicator for short")
+
+    args = parser.parse_args()
     symbols = args.symbols or SYMBOLS
-    indicators = [args.indicator] if args.indicator else None
-    directions = ["long"] if args.long_only else ["long", "short"]
-    run_full_backtest(symbols, args.period, args.interval, indicators, directions,
-                      args.start, args.end, args.htf, args.htf_indicator)
+
+    # Determine if using separate configs or legacy mode
+    using_separate_config = any([
+        args.long_indicator, args.short_indicator,
+        args.long_param_a, args.short_param_a,
+        args.long_htf, args.short_htf
+    ])
+
+    if using_separate_config or args.long_only or args.short_only:
+        # Build separate DirectionConfigs
+        default_indicators = ["supertrend"]
+        if args.indicator:
+            default_indicators = [args.indicator]
+
+        long_config = DirectionConfig(
+            enabled=not args.short_only,
+            indicators=args.long_indicator or default_indicators,
+            param_a=args.long_param_a,
+            param_b=args.long_param_b,
+            atr_mult=args.long_atr_mult,
+            min_hold_bars=args.long_min_hold,
+            htf_filter=args.long_htf or args.htf,
+            htf_indicator=args.long_htf_indicator if args.long_htf else args.htf_indicator
+        )
+
+        short_config = DirectionConfig(
+            enabled=not args.long_only,
+            indicators=args.short_indicator or default_indicators,
+            param_a=args.short_param_a,
+            param_b=args.short_param_b,
+            atr_mult=args.short_atr_mult,
+            min_hold_bars=args.short_min_hold,
+            htf_filter=args.short_htf or args.htf,
+            htf_indicator=args.short_htf_indicator if args.short_htf else args.htf_indicator
+        )
+
+        run_full_backtest(symbols, args.period, args.interval,
+                          start_date=args.start, end_date=args.end,
+                          long_config=long_config, short_config=short_config)
+    else:
+        # Legacy mode - same settings for both directions
+        indicators = [args.indicator] if args.indicator else None
+        directions = ["long"] if args.long_only else ["long", "short"]
+        run_full_backtest(symbols, args.period, args.interval, indicators, directions,
+                          args.start, args.end, args.htf, args.htf_indicator)
