@@ -28,10 +28,23 @@ except ImportError:
 from supertrend_strategy import calculate_atr, calculate_supertrend, calculate_kama, calculate_rsi
 
 
-def generate_dashboard(symbol='AAPL', indicator='supertrend', output_file='trading_dashboard.html'):
-    """Generate the trading dashboard HTML file."""
+def resample_to_htf(df, htf_multiplier=6):
+    """Resample 1h data to higher timeframe (e.g., 6h)."""
+    htf_df = df.resample(f'{htf_multiplier}h').agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum'
+    }).dropna()
+    return htf_df
+
+
+def generate_dashboard(symbol='AAPL', indicator='supertrend', output_file='trading_dashboard.html', htf_multiplier=6):
+    """Generate the trading dashboard HTML file with HTF indicators."""
 
     print(f"Generating dashboard for {symbol} with {indicator}...")
+    print(f"Using {htf_multiplier}x higher timeframe (HTF = {htf_multiplier}h)")
 
     # Check if backtest data exists
     trades_file = Path('backtest_trades.csv')
@@ -69,11 +82,23 @@ def generate_dashboard(symbol='AAPL', indicator='supertrend', output_file='tradi
             'volume': np.random.randint(1000000, 5000000, 500)
         }, index=dates)
 
-    # Calculate indicators
+    # Calculate 1h indicators
     df['atr'] = calculate_atr(df, 14)
     df['supertrend'], df['st_direction'] = calculate_supertrend(df, length=10, factor=3.0)
     df['kama'] = calculate_kama(df['close'], fast_length=14, slow_length=30)
     df['rsi'] = calculate_rsi(df['close'], window=14)
+
+    # Calculate HTF (6h) indicators
+    print(f"Calculating {htf_multiplier}h HTF indicators...")
+    htf_df = resample_to_htf(df, htf_multiplier)
+    htf_df['atr'] = calculate_atr(htf_df, 14)
+    htf_df['supertrend'], htf_df['st_direction'] = calculate_supertrend(htf_df, length=10, factor=3.0)
+    htf_df['kama'] = calculate_kama(htf_df['close'], fast_length=14, slow_length=30)
+
+    # Map HTF values back to 1h timeframe (forward fill)
+    df['htf_supertrend'] = htf_df['supertrend'].reindex(df.index, method='ffill')
+    df['htf_direction'] = htf_df['st_direction'].reindex(df.index, method='ffill')
+    df['htf_kama'] = htf_df['kama'].reindex(df.index, method='ffill')
 
     # Load equity data
     trades_all = pd.read_csv(trades_file).sort_values('exit_time')
@@ -89,8 +114,8 @@ def generate_dashboard(symbol='AAPL', indicator='supertrend', output_file='tradi
         vertical_spacing=0.04,
         row_heights=[0.35, 0.10, 0.10, 0.25, 0.10],
         subplot_titles=(
-            f'{symbol} Price Chart with Indicators',
-            'RSI',
+            f'{symbol} Price Chart (1h + {htf_multiplier}h HTF Indicators)',
+            'RSI (1h)',
             'Volume',
             'Portfolio Equity Curve',
             'Drawdown %'
@@ -120,10 +145,32 @@ def generate_dashboard(symbol='AAPL', indicator='supertrend', output_file='tradi
             row=1, col=1
         )
 
-    # KAMA
+    # KAMA (1h)
     fig.add_trace(
-        go.Scatter(x=df.index, y=df['kama'], mode='lines', name='KAMA',
+        go.Scatter(x=df.index, y=df['kama'], mode='lines', name='KAMA (1h)',
                    line=dict(color='#ff9800', width=1.5)),
+        row=1, col=1
+    )
+
+    # HTF Supertrend (6h) - thicker dashed line
+    for i in range(1, len(df)):
+        if pd.notna(df['htf_direction'].iloc[i]):
+            color = '#00bcd4' if df['htf_direction'].iloc[i] == 1 else '#e91e63'
+            fig.add_trace(
+                go.Scatter(
+                    x=[df.index[i-1], df.index[i]],
+                    y=[df['htf_supertrend'].iloc[i-1], df['htf_supertrend'].iloc[i]],
+                    mode='lines', line=dict(color=color, width=3, dash='dash'),
+                    showlegend=False, hoverinfo='skip'
+                ),
+                row=1, col=1
+            )
+
+    # HTF KAMA (6h) - thicker line
+    fig.add_trace(
+        go.Scatter(x=df.index, y=df['htf_kama'], mode='lines',
+                   name=f'KAMA ({htf_multiplier}h HTF)',
+                   line=dict(color='#9c27b0', width=2.5, dash='dot')),
         row=1, col=1
     )
 
@@ -255,6 +302,7 @@ def generate_dashboard(symbol='AAPL', indicator='supertrend', output_file='tradi
 
     stats_text = (
         f"<b>Summary Stats</b><br>"
+        f"HTF: {htf_multiplier}h (6x base)<br>"
         f"Total Trades: {len(trades_all):,}<br>"
         f"Win Rate: {win_rate:.1f}%<br>"
         f"Total P&L: ${total_pnl:,.2f}<br>"
@@ -282,6 +330,7 @@ if __name__ == '__main__':
     parser.add_argument('--symbol', default='AAPL', help='Symbol to display (default: AAPL)')
     parser.add_argument('--indicator', default='supertrend', help='Indicator (default: supertrend)')
     parser.add_argument('--output', default='trading_dashboard.html', help='Output file')
+    parser.add_argument('--htf', type=int, default=6, help='HTF multiplier (default: 6 = 6h for 1h base)')
     args = parser.parse_args()
 
-    generate_dashboard(args.symbol, args.indicator, args.output)
+    generate_dashboard(args.symbol, args.indicator, args.output, args.htf)
