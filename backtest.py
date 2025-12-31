@@ -106,8 +106,8 @@ def get_htf_signal_for_time(htf_signals, current_time):
 
 def run_backtest_for_symbol(symbol, df, indicator="supertrend", direction="long",
                             initial_capital=1000, param_a=None, param_b=None,
-                            atr_mult=1.5, min_hold_bars=6, htf_signals=None, use_htf_filter=True,
-                            htf_indicator=None):
+                            atr_mult=1.5, min_hold_bars=6, max_hold_bars=0,
+                            htf_signals=None, use_htf_filter=True, htf_indicator=None):
     """Run backtest for a single symbol/indicator/direction combination.
 
     Args:
@@ -120,6 +120,7 @@ def run_backtest_for_symbol(symbol, df, indicator="supertrend", direction="long"
         param_b: Indicator parameter B (e.g., factor for supertrend)
         atr_mult: ATR multiplier for stop loss
         min_hold_bars: Minimum bars to hold before exit
+        max_hold_bars: Maximum bars to hold (0 = no limit, forces exit after N bars)
         htf_signals: Pre-calculated HTF signals for filtering
         use_htf_filter: Whether to use HTF trend filter
         htf_indicator: Name of HTF indicator used (for logging)
@@ -164,6 +165,10 @@ def run_backtest_for_symbol(symbol, df, indicator="supertrend", direction="long"
                     else:
                         if current_price > position["entry_price"] + atr_mult * current_atr:
                             should_exit, exit_reason = True, f"ATR stop"
+
+            # Force exit after max_hold_bars (time-based exit)
+            if not should_exit and max_hold_bars > 0 and position["bars_held"] >= max_hold_bars:
+                should_exit, exit_reason = True, "Max hold"
 
             if should_exit:
                 entry_price = position["entry_price"]
@@ -230,6 +235,7 @@ class DirectionConfig:
     param_b: float = None
     atr_mult: float = 1.5
     min_hold_bars: int = 6
+    max_hold_bars: int = 0  # 0 = no limit, >0 = force exit after N bars
     htf_filter: bool = False
     htf_indicator: str = "kama"
 
@@ -292,10 +298,12 @@ def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None
     # Print configuration summary
     if long_config.enabled:
         htf_desc = f" + HTF({long_config.htf_indicator})" if long_config.htf_filter else ""
-        print(f"LONG:  {','.join(long_config.indicators)} | ATR×{long_config.atr_mult} | MinHold={long_config.min_hold_bars}{htf_desc}")
+        max_desc = f" MaxHold={long_config.max_hold_bars}" if long_config.max_hold_bars > 0 else ""
+        print(f"LONG:  {','.join(long_config.indicators)} | ATR×{long_config.atr_mult} | MinHold={long_config.min_hold_bars}{max_desc}{htf_desc}")
     if short_config.enabled:
         htf_desc = f" + HTF({short_config.htf_indicator})" if short_config.htf_filter else ""
-        print(f"SHORT: {','.join(short_config.indicators)} | ATR×{short_config.atr_mult} | MinHold={short_config.min_hold_bars}{htf_desc}")
+        max_desc = f" MaxHold={short_config.max_hold_bars}" if short_config.max_hold_bars > 0 else ""
+        print(f"SHORT: {','.join(short_config.indicators)} | ATR×{short_config.atr_mult} | MinHold={short_config.min_hold_bars}{max_desc}{htf_desc}")
     print(f"{'='*70}\n")
 
     all_trades, all_results = [], []
@@ -342,6 +350,7 @@ def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None
                     param_b=long_config.param_b,
                     atr_mult=long_config.atr_mult,
                     min_hold_bars=long_config.min_hold_bars,
+                    max_hold_bars=long_config.max_hold_bars,
                     htf_signals=htf_signals_long,
                     use_htf_filter=long_config.htf_filter,
                     htf_indicator=long_config.htf_indicator
@@ -361,6 +370,7 @@ def run_full_backtest(symbols=None, period="6mo", interval="1h", indicators=None
                     param_b=short_config.param_b,
                     atr_mult=short_config.atr_mult,
                     min_hold_bars=short_config.min_hold_bars,
+                    max_hold_bars=short_config.max_hold_bars,
                     htf_signals=htf_signals_short,
                     use_htf_filter=short_config.htf_filter,
                     htf_indicator=short_config.htf_indicator
@@ -432,6 +442,7 @@ Examples:
     long_group.add_argument("--long-param-b", type=float, help="Param B for long indicator")
     long_group.add_argument("--long-atr-mult", type=float, default=1.5, help="ATR multiplier for long stops (default: 1.5)")
     long_group.add_argument("--long-min-hold", type=int, default=6, help="Min hold bars for long (default: 6)")
+    long_group.add_argument("--long-max-hold", type=int, default=0, help="Max hold bars for long (0=no limit)")
     long_group.add_argument("--long-htf", action="store_true", help="Enable HTF filter for long")
     long_group.add_argument("--long-htf-indicator", default="kama", help="HTF indicator for long")
 
@@ -442,6 +453,7 @@ Examples:
     short_group.add_argument("--short-param-b", type=float, help="Param B for short indicator")
     short_group.add_argument("--short-atr-mult", type=float, default=2.0, help="ATR multiplier for short stops (default: 2.0)")
     short_group.add_argument("--short-min-hold", type=int, default=8, help="Min hold bars for short (default: 8)")
+    short_group.add_argument("--short-max-hold", type=int, default=0, help="Max hold bars for short (0=no limit)")
     short_group.add_argument("--short-htf", action="store_true", help="Enable HTF filter for short")
     short_group.add_argument("--short-htf-indicator", default="kama", help="HTF indicator for short")
 
@@ -468,6 +480,7 @@ Examples:
             param_b=args.long_param_b,
             atr_mult=args.long_atr_mult,
             min_hold_bars=args.long_min_hold,
+            max_hold_bars=args.long_max_hold,
             htf_filter=args.long_htf or args.htf,
             htf_indicator=args.long_htf_indicator if args.long_htf else args.htf_indicator
         )
@@ -479,6 +492,7 @@ Examples:
             param_b=args.short_param_b,
             atr_mult=args.short_atr_mult,
             min_hold_bars=args.short_min_hold,
+            max_hold_bars=args.short_max_hold,
             htf_filter=args.short_htf or args.htf,
             htf_indicator=args.short_htf_indicator if args.short_htf else args.htf_indicator
         )
